@@ -621,18 +621,69 @@ def group_messages_abab(messages: list[BaseMessage]) -> list[BaseMessage]:
     return result
 
 
-def output_langchain(messages: list[OutputMessage]):
+def _classify_output(m: OutputMessage) -> str:
+    """Classify a message as 'user', 'assistant', or 'tool_result'."""
+    if m["ai"]:
+        return "assistant"
+    content = m["content"]
+    if _is_raw_message(content) and "tool_name" in content:
+        return "tool_result"
+    return "user"
+
+
+def _format_tool_result_content(content: MessageContent) -> str:
+    """Format a tool result for display in the context window."""
+    raw = cast(dict[str, Any], content)
+    tool_name = raw.get("tool_name", "unknown")
+    tool_result = raw.get("tool_result", "")
+    # Keep it concise — full tool output can be huge
+    if isinstance(tool_result, str) and len(tool_result) > 500:
+        tool_result = tool_result[:500] + "... [truncated]"
+    return f"[Tool Result: {tool_name}] {tool_result}"
+
+
+def output_langchain(messages: list[OutputMessage], companion_labels: bool = False):
+    """Convert output messages to LangChain format.
+    
+    When companion_labels=True (companion mode):
+    - User messages get 'Nicholai: ' prefix
+    - Assistant messages get 'me: ' prefix  
+    - Tool results get '[Tool Result: name]' prefix and don't merge with user messages
+    """
+    if not companion_labels:
+        # Original behavior
+        result = []
+        for m in messages:
+            content = _output_content_langchain(content=m["content"])
+            if not content or (isinstance(content, str) and not content.strip()):
+                continue
+            if m["ai"]:
+                result.append(AIMessage(content))
+            else:
+                result.append(HumanMessage(content))
+        return group_messages_abab(result)
+    
+    # Companion mode: add labels and separate tool results
     result = []
     for m in messages:
-        content = _output_content_langchain(content=m["content"])
-        if not content or (isinstance(content, str) and not content.strip()):
-            continue # skip empty messages, models 
-        if m["ai"]:
-            result.append(AIMessage(content))  # type: ignore
-        else:
-            result.append(HumanMessage(content))  # type: ignore
-    # ensure message type alternation
-    result = group_messages_abab(result)
+        cls = _classify_output(m)
+        if cls == "assistant":
+            content = _output_content_langchain(content=m["content"])
+            if content and (not isinstance(content, str) or content.strip()):
+                result.append(AIMessage(content=f"me: {content}"))
+        elif cls == "tool_result":
+            content = _format_tool_result_content(m["content"])
+            if content.strip():
+                # Use HumanMessage but mark so it doesn't merge with user text
+                result.append(HumanMessage(content=content))
+        else:  # user
+            content = _output_content_langchain(content=m["content"])
+            if content and (not isinstance(content, str) or content.strip()):
+                result.append(HumanMessage(content=f"Nicholai: {content}"))
+    
+    # Don't group in companion mode — labels prevent ambiguity.
+    # group_messages_abab would merge tool results (HumanMessage)
+    # with adjacent user messages (also HumanMessage).
     return result
 
 

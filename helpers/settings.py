@@ -94,6 +94,8 @@ class Settings(TypedDict):
 
     a2a_server_enabled: bool
 
+    companion_labels: bool
+
     variables: str
     secrets: str
 
@@ -482,6 +484,7 @@ def get_default_settings() -> Settings:
         mcp_server_enabled=get_default_value("mcp_server_enabled", False),
         mcp_server_token=create_auth_token(),
         a2a_server_enabled=get_default_value("a2a_server_enabled", False),
+        companion_labels=get_default_value("companion_labels", False),
         variables="",
         secrets="",
         litellm_global_kwargs=get_default_value("litellm_global_kwargs", {}),
