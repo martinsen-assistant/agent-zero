@@ -569,10 +569,11 @@ class Agent:
 
         # convert history + extras to LLM format
         from helpers import settings as settings_helper
-        companion = settings_helper.get_setting()
+        _settings = settings_helper.get_settings()
+        companion_labels = _settings.get("companion_labels", False) if isinstance(_settings, dict) else getattr(_settings, "companion_labels", False)
         history_langchain: list[BaseMessage] = history.output_langchain(
             loop_data.history_output + extras,
-            companion_labels=companion.companion_labels,
+            companion_labels=companion_labels,
         )
 
         # build full prompt from system prompt, message history and extrS
