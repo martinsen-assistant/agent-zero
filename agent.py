@@ -1,4 +1,4 @@
-import asyncio, random, string, threading
+import asyncio, random, string, threading, json
 
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -808,11 +808,25 @@ class Agent:
         # model class
         model = self.get_chat_model()
 
+        # Capture full streamed response for plain text prefix extraction
+        from helpers import settings as _settings_helper
+        _ptr_settings = _settings_helper.get_settings()
+        _ptr_enabled = _ptr_settings.get("plain_text_response", False) if isinstance(_ptr_settings, dict) else getattr(_ptr_settings, "plain_text_response", False)
+        capture = {"full": ""}
+
+        if _ptr_enabled and response_callback:
+            async def _wrapped_callback(chunk, full):
+                capture["full"] = full
+                return await response_callback(chunk, full)
+            _callback = _wrapped_callback
+        else:
+            _callback = response_callback
+
         # call extensions before
         call_data = {
             "model": model,
             "messages": messages,
-            "response_callback": response_callback,
+            "response_callback": _callback,
             "reasoning_callback": reasoning_callback,
             "background": background,
             "explicit_caching": explicit_caching,
@@ -831,6 +845,18 @@ class Agent:
             ),
             explicit_caching=call_data["explicit_caching"],
         )
+
+        # Extract plain text prefix if present (text before JSON tool call)
+        if _ptr_enabled and self.loop_data:
+            self.loop_data.params_temporary["_plain_text_prefix"] = None
+            full = capture["full"]
+            if full:
+                json_root = extract_tools.extract_json_root_string(full)
+                if json_root:
+                    prefix = full[:full.find(json_root)].strip()
+                    if prefix and len(prefix) > 0:
+                        self.loop_data.params_temporary["_plain_text_prefix"] = prefix
+
 
         await extension.call_extensions_async(
             "chat_model_call_after", self, call_data=call_data, response=response, reasoning=reasoning
@@ -873,8 +899,68 @@ class Agent:
 
     @extension.extensible
     async def process_tools(self, msg: str):
+        # Check if plain_text_response is enabled
+        from helpers import settings as settings_helper
+        _settings = settings_helper.get_settings()
+        ptr_enabled = _settings.get("plain_text_response", False) if isinstance(_settings, dict) else getattr(_settings, "plain_text_response", False)
+
         # search for tool usage requests in agent message
         tool_request = extract_tools.json_parse_dirty(msg)
+
+        # Plain text response handling
+        if ptr_enabled:
+            if tool_request is not None:
+                # Valid JSON tool call — check for mixed content prefix
+                prefix = None
+                if self.loop_data:
+                    prefix = self.loop_data.params_temporary.pop("_plain_text_prefix", None)
+                if prefix:
+                    # Send plain text prefix as inline response
+                    wrapped = json.dumps({
+                        "thoughts": [],
+                        "headline": "",
+                        "tool_name": "response",
+                        "tool_args": {"text": prefix, "break_loop": False}
+                    })
+                    # Process inline response through original path
+                    await extension.call_extensions_async(
+                        "chat_model_call_before", self, call_data={}
+                    )
+                    # Log the prefix for web UI
+                    if self.loop_data:
+                        gen_item = self.loop_data.params_temporary.get("log_item_generating")
+                        shared_id = gen_item.id if gen_item and gen_item.id else ""
+                        log_item = self.context.log.log(
+                            type="response",
+                            heading=f"icon://chat {self.agent_name}: Responding",
+                            id=shared_id,
+                        )
+                        log_item.update(content=prefix)
+                        log_item.update(finished=True)
+            else:
+                # No JSON detected — check if it's plain text
+                stripped = msg.strip() if msg else ""
+                if stripped and not stripped.startswith("{") and not stripped.startswith("["):
+                    # Pure plain text — wrap as response tool call
+                    if self.loop_data and "log_item_response" not in self.loop_data.params_temporary:
+                        gen_item = self.loop_data.params_temporary.get("log_item_generating")
+                        shared_id = gen_item.id if gen_item and gen_item.id else ""
+                        self.loop_data.params_temporary["log_item_response"] = (
+                            self.context.log.log(
+                                type="response",
+                                heading=f"icon://chat {self.agent_name}: Responding",
+                                id=shared_id,
+                            )
+                        )
+                        self.loop_data.params_temporary["log_item_response"].update(content=msg)
+                    msg = json.dumps({
+                        "thoughts": [],
+                        "headline": "",
+                        "tool_name": "response",
+                        "tool_args": {"text": msg}
+                    })
+                    # Re-parse as tool request
+                    tool_request = extract_tools.json_parse_dirty(msg)
 
         # Only validate when extraction produced an object; None means no JSON tool
         # block was found — the misformat warning path below handles that.

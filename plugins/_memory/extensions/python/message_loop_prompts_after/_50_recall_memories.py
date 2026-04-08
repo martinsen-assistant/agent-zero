@@ -158,14 +158,17 @@ class RecallMemories(Extension):
 
             # call AI to validate the memories
             try:
-                filter = await self.agent.call_utility_model(
-                    system=self.agent.read_prompt("memory.memories_filter.sys.md"),
-                    message=self.agent.read_prompt(
-                        "memory.memories_filter.msg.md",
-                        memories=mems_list,
-                        history=history,
-                        message=user_instruction,
+                filter = await asyncio.wait_for(
+                    self.agent.call_utility_model(
+                        system=self.agent.read_prompt("memory.memories_filter.sys.md"),
+                        message=self.agent.read_prompt(
+                            "memory.memories_filter.msg.md",
+                            memories=mems_list,
+                            history=history,
+                            message=user_instruction,
+                        ),
                     ),
+                    timeout=60,
                 )
                 filter_inds = dirty_json.try_parse(filter)
 
@@ -192,10 +195,11 @@ class RecallMemories(Extension):
                 memories = filtered_memories
                 solutions = filtered_solutions
 
-            except Exception as e:
+            except (asyncio.TimeoutError, asyncio.CancelledError, Exception) as e:
+                # Post-filter timed out or failed - use unfiltered results
                 err = errors.format_error(e)
                 self.agent.context.log.log(
-                    type="warning", heading="Failed to filter relevant memories", content=err
+                    type="warning", heading="Post-filter skipped, using unfiltered results", content=err
                 )
                 filter_inds = []
 
